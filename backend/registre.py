@@ -21,18 +21,17 @@ RACINE = Path(__file__).resolve().parent.parent / "bordelpdf"
 class Template:
     nom: str
     pdf: Path
-    reperes: dict          # {champ_logique: (texte, align[, mode])}
-    mapper: object = None  # callable(resultat, identite, lignes) -> {champ: str}  (pipeline Cat/Ligne)
-    mapper_config: object = None  # callable(fiche_composer, cfg) -> {champ: str}  (pipeline composer)
-    periode: object = None  # callable(annee, mois) -> {champ: str} (pour le multi-mois)
-    page_index: int = 0    # page où se trouve le décompte (0 par défaut)
-    employeur_fixe: dict = field(default_factory=dict)  # info affichée au front : « employeur baked into PDF »
-    supporte_atn: bool = False  # le sample du PDF contient-il des lignes ATN remplissables ?
+    reperes: dict
+    mapper: object = None
+    mapper_config: object = None
+    periode: object = None
+    page_index: int = 0
+    employeur_fixe: dict = field(default_factory=dict)
+    supporte_atn: bool = False
     supporte_cheques_repas: bool = False
     supporte_fpe: bool = False
-    pages_a_garder: list = None  # indices des pages à conserver (None = toutes). Les autres pages
-                                  # (suite/planning/courrier) sont SUPPRIMÉES pour ne pas afficher
-                                  # de données résiduelles du sample (matricule/nom d'origine).
+    supporte_composer: bool = False   # ← ajoute cette ligne
+    pages_a_garder: list = None
     _champs: list = field(default=None, init=False, repr=False)
 
     def champs(self) -> list[Champ]:
