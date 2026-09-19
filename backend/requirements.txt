@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+weasyprint
+jinja2
+pypdf
+httpx
+python-dotenv
+pymupdf

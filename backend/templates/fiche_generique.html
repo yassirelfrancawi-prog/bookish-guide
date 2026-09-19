@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 8.5pt; color: #111; line-height: 1.35; }
+
+  .header { display: flex; justify-content: space-between; gap: 12mm; }
+  .header .left { width: 48%; }
+  .header .right { width: 52%; }
+  .employer { font-weight: 700; }
+  .muted { color: #333; }
+  .title { font-size: 11pt; font-weight: 700; letter-spacing: .3px; }
+
+  .perso { margin-top: 12px; }
+  .perso .h { font-weight: 700; border-bottom: .8pt solid #333; padding-bottom: 2px; margin-bottom: 4px; }
+  .row2 { display: flex; }
+  .row2 .k { width: 55%; }
+  .row2 .v { width: 45%; }
+
+  .addr { margin-top: 22px; }
+  .addr .conf { font-size: 7pt; letter-spacing: .5px; text-decoration: underline; color: #444; }
+  .addr .name { font-weight: 700; font-size: 10pt; }
+
+  table.d { width: 100%; border-collapse: collapse; margin-top: 24px; }
+  table.d thead th { background: #111; color: #fff; text-align: left; padding: 4px 6px; font-size: 8pt; }
+  table.d th.amt, table.d td.amt { text-align: right; white-space: nowrap; }
+  .col-code { width: 10%; color: #444; }
+  .col-desc { width: 62%; }
+  .col-amt { width: 28%; }
+  table.d td { padding: 1.5px 6px; }
+  tr.sub td { font-weight: 700; border-top: .5pt solid #999; border-bottom: .5pt solid #999; padding: 3px 6px; }
+
+  .netbox { display: flex; justify-content: flex-end; margin-top: 3px; }
+  .netbox .lbl { background: #111; color: #fff; padding: 3px 12px; font-weight: 700; }
+  .netbox .val { border: .8pt solid #111; padding: 3px 12px; font-weight: 700; min-width: 95px; text-align: right; }
+
+  .footer { position: fixed; bottom: 0; left: 0; right: 0; display: flex; justify-content: space-between;
+            font-size: 6.5pt; color: #555; border-top: .5pt solid #ccc; padding-top: 3px; }
+  .footer .brand { font-weight: 700; }
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="left">
+      <div class="employer">{{ employeur.nom }}</div>
+      <div class="muted">{{ employeur.adresse }}</div>
+      <div class="muted">{{ employeur.cp_ville }}</div>
+    </div>
+    <div class="right">
+      <div class="title">DÉCOMPTE SALARIAL</div>
+      <div class="muted">Période du {{ periode.debut }} au {{ periode.fin }}</div>
+      <div class="muted">Date de calcul : {{ periode.calcul }}</div>
+      <div class="perso">
+        <div class="h">Données personnelles</div>
+        <div class="row2"><div class="k">NISS</div><div class="v">{{ perso.niss }}</div></div>
+        <div class="row2"><div class="k">État civil</div><div class="v">{{ perso.etat_civil }}</div></div>
+        <div class="row2"><div class="k">Personnes à charge</div><div class="v">{{ perso.charges }}</div></div>
+        <div class="row2"><div class="k">Statut</div><div class="v">{{ perso.statut }}</div></div>
+        <div class="row2"><div class="k">Caisse d'assurances sociales</div><div class="v">{{ perso.caisse }}</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="addr">
+    <div class="conf">CONFIDENTIEL</div>
+    <div class="name">{{ salarie.nom }}</div>
+    <div>{{ salarie.adresse }}</div>
+    <div>{{ salarie.cp_ville }}</div>
+  </div>
+
+  <table class="d">
+    <thead>
+      <tr><th class="col-code">Code</th><th class="col-desc">Description</th><th class="amt col-amt">Montants</th></tr>
+    </thead>
+    <tbody>
+      {% for sec in sections %}
+        {% for l in sec.lignes %}
+        <tr><td class="col-code">{{ l.code }}</td><td class="col-desc">{{ l.desc }}</td><td class="amt">{{ l.montant_fmt }}</td></tr>
+        {% endfor %}
+        <tr class="sub"><td></td><td>{{ sec.label }}</td><td class="amt">{{ sec.total_fmt }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="netbox">
+    <div class="lbl">net</div>
+    <div class="val">€ {{ net_fmt }}</div>
+  </div>
+
+  <div class="footer">
+    <div class="brand">{{ footer_marque }}</div>
+    <div>{{ pagination }}</div>
+  </div>
+
+</body>
+</html>
