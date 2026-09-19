@@ -8,10 +8,12 @@ import io
 import os
 import zipfile
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 
 # Charge backend/.env si présent (BOT_TOKEN, ALLOWED_IDS).
@@ -29,6 +31,14 @@ import registre
 CATS_VALIDES = {v for k, v in vars(Cat).items() if not k.startswith("_")}
 
 app = FastAPI(title="Certifio — génération de fiches de paie")
+
+# ── Servir le frontend compilé ────────────────────────────────────────────────
+# Le dist/ est buildé dans frontend/dist/ (un niveau au-dessus du backend/).
+_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+if _DIST.exists():
+    # Monte tous les assets (JS, CSS, images) sous /assets
+    app.mount("/assets", StaticFiles(directory=str(_DIST / "assets")), name="assets")
 
 
 class LigneIn(BaseModel):
@@ -48,7 +58,7 @@ class LigneIn(BaseModel):
 class FicheIn(BaseModel):
     lignes: list[LigneIn]
     identite: dict | None = None
-    init_data: str | None = None  # initData Telegram (validé si un bot est configuré)
+    init_data: str | None = None
 
 
 @app.get("/api/sante")
@@ -62,12 +72,6 @@ def _ids_autorises() -> set[int]:
 
 
 def _chat_id_si_bot(init_data: str | None):
-    """Si un bot est configuré, valide l'initData + ACL et renvoie le chat_id ; sinon None.
-
-    - Pas de BOT_TOKEN : mode local sans auth, retourne None.
-    - BOT_TOKEN défini + ALLOWED_IDS vide : tout user Telegram valide est accepté.
-    - BOT_TOKEN défini + ALLOWED_IDS non vide : seuls ces user_id passent (403 sinon).
-    """
     token = os.environ.get("BOT_TOKEN")
     if not token:
         return None
@@ -84,7 +88,6 @@ def _chat_id_si_bot(init_data: str | None):
 
 
 def _reponse_pdf(pdf: bytes, chat_id, nom="fiche-de-paie.pdf", legende="Votre fiche de paie"):
-    """Poste le PDF via le bot si un chat est identifié, sinon le renvoie en download."""
     token = os.environ.get("BOT_TOKEN")
     if token and chat_id:
         envoyer_pdf(chat_id, pdf, token, nom, legende)
@@ -97,7 +100,6 @@ def _reponse_pdf(pdf: bytes, chat_id, nom="fiche-de-paie.pdf", legende="Votre fi
 
 @app.post("/api/generer")
 def generer(fiche: FicheIn):
-    """Rendu HTML/CSS (plan B) : reconstruit la fiche depuis les lignes."""
     chat_id = _chat_id_si_bot(fiche.init_data)
     lignes = [Ligne(l.code, l.desc, l.montant, l.cat) for l in fiche.lignes]
     pdf = rendre_bytes(donnees(lignes, fiche.identite))
@@ -106,7 +108,6 @@ def generer(fiche: FicheIn):
 
 @app.get("/api/templates/{cle}/preview")
 def template_preview(cle: str):
-    """Aperçu PNG du PDF original du template (page utile, basse résolution)."""
     import fitz
     t = registre.get(cle)
     if t is None:
@@ -118,7 +119,6 @@ def template_preview(cle: str):
 
 @app.get("/api/templates")
 def templates() -> dict:
-    """Liste les templates overlay disponibles et leurs champs."""
     return {
         cle: {
             "nom": t.nom,
@@ -141,7 +141,6 @@ class OverlayIn(BaseModel):
 
 @app.post("/api/generer-overlay")
 def generer_overlay(req: OverlayIn):
-    """Rendu overlay (au millimètre) : tamponne des valeurs fournies sur le PDF original."""
     t = registre.get(req.template)
     if t is None:
         raise HTTPException(404, f"template inconnu : {req.template}")
@@ -163,7 +162,6 @@ class FicheGeneriqueIn(BaseModel):
 
 @app.post("/api/fiche-generique")
 def fiche_generique(req: FicheGeneriqueIn):
-    """Rendu HTML flexible : fiche configurable (sections fournies) → PDF."""
     chat_id = _chat_id_si_bot(req.init_data)
     fiche = req.model_dump(exclude={"init_data"})
     pdf = rendre_generique(fiche)
@@ -175,12 +173,12 @@ class ConfigIn(BaseModel):
     periode: dict
     perso: dict
     salarie: dict
-    situation: dict           # dirigeant, ouvrier, conjoint_sans_revenus, enfants
+    situation: dict
     brut: str
-    cotisations: str = ""     # ONSS (vide = calculé auto)
-    bonus_emploi: str = ""    # bonus à l'emploi (vide = calculé auto)
+    cotisations: str = ""
+    bonus_emploi: str = ""
     atn: list[dict] = []
-    voiture_modele: str = ""  # modèle ou marque (BB Pharma : remplace « Porsche » par défaut)
+    voiture_modele: str = ""
     cheques_repas: str = ""
     fpe: str = ""
     init_data: str | None = None
@@ -188,7 +186,6 @@ class ConfigIn(BaseModel):
 
 @app.post("/api/fiche-config")
 def fiche_config(req: ConfigIn):
-    """Entrées simples → précompte CALCULÉ → fiche assemblée → PDF."""
     chat_id = _chat_id_si_bot(req.init_data)
     cfg = req.model_dump(exclude={"init_data"})
     try:
@@ -204,19 +201,16 @@ class FicheOverlayConfigIn(ConfigIn):
 
 
 def _strip_pages(pdf_bytes: bytes, pages_a_garder: list | None) -> bytes:
-    """Conserve uniquement les pages indiquées et purge les ressources orphelines."""
     if not pages_a_garder:
         return pdf_bytes
     import fitz
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     doc.select(pages_a_garder)
-    # garbage=4 + deflate : nettoie fonts/images non référencées → PDF beaucoup plus léger.
     return doc.tobytes(garbage=4, deflate=True)
 
 
 @app.post("/api/fiche-overlay")
 def fiche_overlay(req: FicheOverlayConfigIn):
-    """Entrées simples → composer → mapper du template → PDF au visuel du template."""
     t = registre.get(req.template)
     if t is None:
         raise HTTPException(404, f"template inconnu : {req.template}")
@@ -235,7 +229,6 @@ def fiche_overlay(req: FicheOverlayConfigIn):
 
 
 def _periode_mois(annee: int, mois: int) -> dict:
-    """Construit le dict periode (debut/fin/calcul) du mois donné, format JJ/MM/AAAA."""
     import calendar
     dernier = calendar.monthrange(annee, mois)[1]
     return {
@@ -246,7 +239,6 @@ def _periode_mois(annee: int, mois: int) -> dict:
 
 
 def _trois_mois_finissant(annee: int, mois: int):
-    """Liste des 3 (annee, mois) finissant au mois donné, plus ancien au plus récent."""
     out = []
     for delta in range(2, -1, -1):
         m, a = mois - delta, annee
@@ -261,16 +253,11 @@ class FicheOverlay3MoisIn(ConfigIn):
     template: str
     annee: int
     mois: int
-    bruts: list[str] | None = None  # 3 bruts [m-2, m-1, m] ; si absent : brut répété 3×
+    bruts: list[str] | None = None
 
 
 @app.post("/api/fiche-overlay-3mois")
 def fiche_overlay_3mois(req: FicheOverlay3MoisIn):
-    """3 fiches d'affilée (mois courant + 2 précédents) → ZIP ou envoi Telegram.
-
-    `bruts` optionnel : 3 valeurs [m-2, m-1, m] pour des salaires différents par mois.
-    Si absent (ou liste partielle), on complète avec `brut` répété.
-    """
     t = registre.get(req.template)
     if t is None:
         raise HTTPException(404, f"template inconnu : {req.template}")
@@ -279,7 +266,6 @@ def fiche_overlay_3mois(req: FicheOverlay3MoisIn):
     chat_id = _chat_id_si_bot(req.init_data)
     cfg_base = req.model_dump(exclude={"init_data", "template", "annee", "mois", "bruts"})
 
-    # Brut par mois : utilise `bruts` si fourni, sinon `brut` répété.
     bruts_demandes = req.bruts or []
     bruts_par_mois = [
         (bruts_demandes[i].strip() if i < len(bruts_demandes) and bruts_demandes[i].strip() else req.brut)
@@ -323,7 +309,6 @@ class TroisMoisIn(BaseModel):
 
 
 def _mois_precedents(annee: int, mois: int, n: int = 3):
-    """Les n mois se terminant à (annee, mois), du plus ancien au plus récent."""
     out = []
     for delta in range(n - 1, -1, -1):
         m, a = mois - delta, annee
@@ -336,7 +321,6 @@ def _mois_precedents(annee: int, mois: int, n: int = 3):
 
 @app.post("/api/fiche-3mois")
 def fiche_3mois(req: TroisMoisIn):
-    """3 PDF pour les 3 mois finissant au mois choisi (ex. mai → mars, avril, mai)."""
     t = registre.get(req.template)
     if t is None:
         raise HTTPException(404, f"template inconnu : {req.template}")
@@ -374,7 +358,6 @@ class FicheIn2(BaseModel):
 
 @app.post("/api/fiche")
 def fiche(req: FicheIn2):
-    """Pipeline complet : lignes → moteur → mapper du template → overlay au mm."""
     t = registre.get(req.template)
     if t is None:
         raise HTTPException(404, f"template inconnu : {req.template}")
@@ -386,3 +369,12 @@ def fiche(req: FicheIn2):
     valeurs = t.mapper(resultat, req.identite or {}, lignes)
     pdf = appliquer(str(t.pdf), t.champs(), valeurs, t.page_index)
     return _reponse_pdf(pdf, chat_id)
+
+
+# ── Fallback SPA : toutes les routes non-API renvoient index.html ─────────────
+@app.get("/{full_path:path}")
+def spa_fallback(full_path: str):
+    index = _DIST / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    raise HTTPException(404, "Frontend non buildé")
