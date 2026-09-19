@@ -21,17 +21,18 @@ RACINE = Path(__file__).resolve().parent.parent / "bordelpdf"
 class Template:
     nom: str
     pdf: Path
-    reperes: dict
-    mapper: object = None
-    mapper_config: object = None
-    periode: object = None
-    page_index: int = 0
-    employeur_fixe: dict = field(default_factory=dict)
-    supporte_atn: bool = False
+    reperes: dict          # {champ_logique: (texte, align[, mode])}
+    mapper: object = None  # callable(resultat, identite, lignes) -> {champ: str}  (pipeline Cat/Ligne)
+    mapper_config: object = None  # callable(fiche_composer, cfg) -> {champ: str}  (pipeline composer)
+    periode: object = None  # callable(annee, mois) -> {champ: str} (pour le multi-mois)
+    page_index: int = 0    # page où se trouve le décompte (0 par défaut)
+    employeur_fixe: dict = field(default_factory=dict)  # info affichée au front : « employeur baked into PDF »
+    supporte_atn: bool = False  # le sample du PDF contient-il des lignes ATN remplissables ?
     supporte_cheques_repas: bool = False
     supporte_fpe: bool = False
-    supporte_composer: bool = False   # ← ajoute cette ligne
-    pages_a_garder: list = None
+    pages_a_garder: list = None  # indices des pages à conserver (None = toutes). Les autres pages
+                                  # (suite/planning/courrier) sont SUPPRIMÉES pour ne pas afficher
+                                  # de données résiduelles du sample (matricule/nom d'origine).
     _champs: list = field(default=None, init=False, repr=False)
 
     def champs(self) -> list[Champ]:
@@ -695,371 +696,268 @@ TEMPLATES["cpas_verviers"].mapper_config = _mapper_cpas_config
 TEMPLATES["sdworx_bbpharma"].mapper_config = _mapper_sdworx_bbpharma_config
 
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers communs
+# Helpers communs nouveaux templates
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _periode_mm_aaaa(annee: int, mois: int) -> str:
-    return f"{mois:02d}/{annee}"
+def _mois_texte_fr(mois: int) -> str:
+    return ["janvier","février","mars","avril","mai","juin",
+            "juillet","août","septembre","octobre","novembre","décembre"][mois-1]
 
+def _periode_debut_fin_slash(annee: int, mois: int):
+    import calendar as _cal
+    d = _cal.monthrange(annee, mois)[1]
+    return f"01/{mois:02d}/{annee}", f"{d:02d}/{mois:02d}/{annee}"
 
-def _periode_debut_fin(annee: int, mois: int) -> tuple[str, str]:
-    dernier = calendar.monthrange(annee, mois)[1]
-    return f"01/{mois:02d}/{annee}", f"{dernier:02d}/{mois:02d}/{annee}"
-
-
-def _periode_debut_fin_tiret(annee: int, mois: int) -> tuple[str, str]:
-    dernier = calendar.monthrange(annee, mois)[1]
-    return f"01-{mois:02d}-{annee}", f"{dernier:02d}-{mois:02d}-{annee}"
-
-
-def _mois_texte(mois: int) -> str:
-    mois_fr = ["janvier","février","mars","avril","mai","juin",
-               "juillet","août","septembre","octobre","novembre","décembre"]
-    return mois_fr[mois - 1]
-
+def _periode_debut_fin_tiret(annee: int, mois: int):
+    import calendar as _cal
+    d = _cal.monthrange(annee, mois)[1]
+    return f"01-{mois:02d}-{annee}", f"{d:02d}-{mois:02d}-{annee}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. HSP — Human Social Process (CLAES FISH SPRL)
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_HSP = {
-    # Identité salarié
-    "nom":             ("Fraihi Yasmina",        "left"),
-    "adresse_rue":     ("Tulpenlaan",             "left"),
-    "adresse_ville":   ("1500 Halle",             "left"),
-    "niss":            ("97.06.21 362-20",         "left"),
-    # Période
-    "periode_debut":   ("01-07-2025",             "left", "sous"),
-    "periode_fin":     ("31-07-2025",             "left", "sous"),
-    # Données perso (libellé → valeur à droite)
-    "etat_civil":      ("Etat civil:",            "left", "apres"),
-    # Montants
-    "brut_onss":       ("3.020,28",               "right"),
-    "onss_perso":      ("-426,33",                "right"),
-    "imposable":       ("2.593,95",               "right"),
-    "precompte":       ("-437,58",                "right"),
-    "salaire_net":     ("2.549,25",               "right"),
-    "net_decompte":    ("2.549,25",               "right"),   # page 2 décompte
-    "a_payer":         ("2.549,25",               "right"),
+    "nom":           ("Fraihi Yasmina",     "left"),
+    "adresse_rue":   ("Tulpenlaan,31 / 2.01","left"),
+    "adresse_ville": ("1500 Halle",          "left"),
+    "niss":          ("97.06.21 362-20",     "left"),
+    "periode":       ("Période : 01-07-2025 - 31-07-2025", "left"),
+    "brut_onss":     ("EUR  3.020,28",       "right"),
+    "onss_perso":    ("-426,33",             "right"),
+    "imposable":     ("EUR",                 "right"),
+    "precompte":     ("-437,58",             "right"),
+    "salaire_net":   ("EUR  2.549,25",       "right"),
 }
-
 
 def _periode_hsp(annee: int, mois: int) -> dict:
     debut, fin = _periode_debut_fin_tiret(annee, mois)
-    return {"periode_debut": debut, "periode_fin": fin}
-
+    return {"periode": f"Période : {debut} - {fin}"}
 
 def _mapper_hsp_config(fiche: dict, cfg: dict) -> dict:
     c = fiche["calculs"]
-    brut   = D(c["brut_total"])
-    onss   = D(c["onss_perso"])
-    bonus  = D(c["bonus_social"])
-    imp    = D(c["imposable"])
-    prec   = D(c["precompte_net"])
-    net    = imp - prec
-    onss_net = onss - bonus
-
-    debut, fin = _periode_debut_fin_tiret(
-        int(cfg["periode"].get("annee", 2026)),
-        int(cfg["periode"].get("mois", 1)),
-    )
+    brut  = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon   = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec  = D(c["precompte_net"]); net = imp - prec
+    parts = (cfg["periode"].get("debut") or "").split("/")
+    debut_t = parts[0].replace("/","-") if parts else ""
+    fin_t   = (cfg["periode"].get("fin") or "").replace("/","-")
     return {
         "nom":           (cfg["salarie"].get("nom") or "").strip(),
-        "adresse_rue":   cfg["salarie"].get("adresse", ""),
-        "adresse_ville": cfg["salarie"].get("cp_ville", ""),
-        "niss":          cfg["perso"].get("niss", ""),
-        "etat_civil":    cfg["perso"].get("etat_civil", ""),
-        "periode_debut": debut,
-        "periode_fin":   fin,
-        "brut_onss":     eur_be(brut),
-        "onss_perso":    _signe(-onss_net),
-        "imposable":     eur_be(imp),
+        "adresse_rue":   cfg["salarie"].get("adresse",""),
+        "adresse_ville": cfg["salarie"].get("cp_ville",""),
+        "niss":          cfg["perso"].get("niss",""),
+        "periode":       f"Période : {cfg['periode'].get('debut','').replace('/','- ')} - {cfg['periode'].get('fin','').replace('/','-')}",
+        "brut_onss":     "EUR  " + eur_be(brut),
+        "onss_perso":    _signe(-(onss - bon)),
+        "imposable":     "EUR",
         "precompte":     _signe(-prec),
-        "salaire_net":   eur_be(net),
-        "net_decompte":  eur_be(net),
-        "a_payer":       eur_be(net),
+        "salaire_net":   "EUR  " + eur_be(net),
     }
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. BOSA / SPF Justice
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_BOSA = {
-    # Page 1 — résumé
-    "nom":             ("EL AKHSSASSI SHAYNES",  "left"),
-    "adresse_rue":     ("Rue du Poncay 12",       "left"),
-    "adresse_ville":   ("4020 BRESSOUX",          "left"),
-    "niss":            ("07092729012",            "left"),
-    "net_montant":     ("1.875,70",               "right"),   # grand chiffre page 1
-    "periode_calcul":  ("08/2026",                "left", "apres"),
-    # Page 2 — détail
-    "brut_mensuel":    ("1.987,89",               "right"),
-    "allocation_res":  ("89,21",                  "right"),
-    "total_brut":      ("2.077,10",               "right"),
-    "onss_total":      ("-334,65",                "right"),
-    "bonus_bs":        ("80,08",                  "right"),
-    "bonus_tbs":       ("53,17",                  "right"),
-    "total_imposable": ("1.875,70",               "right"),
-    "total_net":       ("1.875,70",               "right"),
+    "nom":            ("EL AKHSSASSI SHAYNES", "left"),
+    "adresse_rue":    ("Rue du Poncay 12",      "left"),
+    "adresse_ville":  ("4020 BRESSOUX",         "left"),
+    "niss":           ("07092729012",           "left"),
+    "net_montant":    ("1.875,70  \u20ac",      "left"),
+    "periode_calcul": ("Période du calcul : 08/2026", "left"),
 }
 
-
 def _periode_bosa(annee: int, mois: int) -> dict:
-    return {"periode_calcul": f"{mois:02d}/{annee}"}
-
+    return {"periode_calcul": f"Période du calcul : {mois:02d}/{annee}"}
 
 def _mapper_bosa_config(fiche: dict, cfg: dict) -> dict:
-    c   = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = imp - prec
-
+    c = fiche["calculs"]
+    imp  = D(c["imposable"]); prec = D(c["precompte_net"]); net = imp - prec
     parts = (cfg["periode"].get("debut") or "").split("/")
-    periode_str = f"{parts[1]}/{parts[2]}" if len(parts) == 3 else ""
-
+    mm_aa = f"{parts[1]}/{parts[2]}" if len(parts)==3 else ""
     return {
-        "nom":             (cfg["salarie"].get("nom") or "").upper(),
-        "adresse_rue":     cfg["salarie"].get("adresse", ""),
-        "adresse_ville":   cfg["salarie"].get("cp_ville", ""),
-        "niss":            cfg["perso"].get("niss", ""),
-        "net_montant":     eur_be(net),
-        "periode_calcul":  periode_str,
-        "brut_mensuel":    eur_be(brut),
-        "allocation_res":  "0,00",
-        "total_brut":      eur_be(brut),
-        "onss_total":      _signe(-onss),
-        "bonus_bs":        eur_be(bon * D("0.6")) if bon > 0 else "0,00",
-        "bonus_tbs":       eur_be(bon * D("0.4")) if bon > 0 else "0,00",
-        "total_imposable": eur_be(net),
-        "total_net":       eur_be(net),
+        "nom":            (cfg["salarie"].get("nom") or "").upper(),
+        "adresse_rue":    cfg["salarie"].get("adresse",""),
+        "adresse_ville":  cfg["salarie"].get("cp_ville",""),
+        "niss":           cfg["perso"].get("niss",""),
+        "net_montant":    eur_be(net) + "  \u20ac",
+        "periode_calcul": f"Période du calcul : {mm_aa}",
     }
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. T.PALM — billet de paie construction
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_TPALM = {
-    "nom":          ("MECHBAL MOHAMED",   "left"),
-    "adresse_rue":  ("Grand route 146",   "left"),
-    "adresse_ville":("4690 BASSENGE",     "left"),
-    "niss":         ("96052048395",       "left"),
-    "periode":      ("01/06/2026",        "left", "sous"),
-    "brut":         ("3866,73",           "right"),
-    "onss":         ("545,81",            "right"),
-    "imposable":    ("3320,92",           "right"),
-    "precompte":    ("796,17",            "right"),
-    "net":          ("2611,25",           "right"),
-    "net_payer":    ("2611,25",           "right"),
+    "nom":           ("MECHBAL MOHAMED",          "left"),
+    "adresse_rue":   ("Grand route 146",           "left"),
+    "adresse_ville": ("4690 BASSENGE",             "left"),
+    "niss":          ("96052048395",               "left"),
+    "periode":       ("01/06/2026 - 30/06/2026",  "left"),
+    "brut":          ("3866,73",                   "right"),
+    "onss":          ("545,81",                    "right"),
+    "imposable":     ("3320,92",                   "right"),
+    "precompte":     ("796,17",                    "right"),
+    "net":           ("2611,25",                   "right"),
+    "net_payer":     ("NET A PAYER",               "right", "ligne"),
 }
 
-
 def _periode_tpalm(annee: int, mois: int) -> dict:
-    debut, fin = _periode_debut_fin(annee, mois)
+    debut, fin = _periode_debut_fin_slash(annee, mois)
     return {"periode": f"{debut} - {fin}"}
 
-
 def _mapper_tpalm_config(fiche: dict, cfg: dict) -> dict:
-    c    = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = imp - prec
-    onss_net = onss - bon
-
-    debut = cfg["periode"].get("debut", "")
-    fin   = cfg["periode"].get("fin", "")
+    c = fiche["calculs"]
+    brut = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon  = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec = D(c["precompte_net"]); net = imp - prec
+    debut = cfg["periode"].get("debut",""); fin = cfg["periode"].get("fin","")
+    def fmt(v): return eur_be(v).replace(".","").replace(",",",")
     return {
         "nom":           (cfg["salarie"].get("nom") or "").upper(),
-        "adresse_rue":   cfg["salarie"].get("adresse", ""),
-        "adresse_ville": cfg["salarie"].get("cp_ville", ""),
-        "niss":          cfg["perso"].get("niss", ""),
+        "adresse_rue":   cfg["salarie"].get("adresse",""),
+        "adresse_ville": cfg["salarie"].get("cp_ville",""),
+        "niss":          cfg["perso"].get("niss",""),
         "periode":       f"{debut} - {fin}",
-        "brut":          eur_be(brut).replace(".", "").replace(",", ","),
-        "onss":          eur_be(onss_net).replace(".", "").replace(",", ","),
-        "imposable":     eur_be(imp).replace(".", "").replace(",", ","),
-        "precompte":     eur_be(prec).replace(".", "").replace(",", ","),
-        "net":           eur_be(net).replace(".", "").replace(",", ","),
-        "net_payer":     eur_be(net).replace(".", "").replace(",", ","),
+        "brut":          fmt(brut),
+        "onss":          fmt(onss - bon),
+        "imposable":     fmt(imp),
+        "precompte":     fmt(prec),
+        "net":           fmt(net),
+        "net_payer":     fmt(net),
     }
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. UCM — Secrétariat social
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_UCM = {
-    "nom":              ("KOUATCHI Miyobor",    "left"),
-    "adresse_rue":      ("RUE DU VALLON",       "left"),
-    "adresse_ville":    ("4031 Angleur",         "left"),
-    "niss":             ("04041940935",          "left"),
-    "periode":          ("juin 2026",            "left", "apres"),
-    "date_calcul":      ("09/07/2026",           "left", "apres"),
-    "brut_onss":        ("3.219,75",             "right"),
-    "onss_trav":        ("211,68",               "right"),
-    "imposable":        ("3.008,07",             "right"),
-    "precompte":        ("499,44",               "right"),
-    "net_base":         ("2.508,63",             "right"),
-    "net_payer":        ("2.924,65",             "right"),
+    "nom":           ("KOUATCHI Miyobor",     "left"),
+    "adresse_rue":   ("RUE DU VALLON, 1 B B092","left"),
+    "adresse_ville": ("4031 Angleur",          "left"),
+    "niss":          ("04041940935",           "left"),
+    "periode":       ("Période juin 2026",     "left"),
+    "date_calcul":   ("Calculé le 09/07/2026","left"),
+    "brut_onss":     ("3.219,75",              "right"),
+    "onss_trav":     ("211,68",                "right"),
+    "imposable":     ("3.008,07",              "right"),
+    "precompte":     ("499,44",                "right"),
+    "net_base":      ("2.508,63",              "right"),
+    "net_payer":     ("2.924,65 EUR",          "right"),
 }
 
-
 def _periode_ucm(annee: int, mois: int) -> dict:
-    return {"periode": f"{_mois_texte(mois)} {annee}"}
-
+    return {"periode": f"Période {_mois_texte_fr(mois)} {annee}"}
 
 def _mapper_ucm_config(fiche: dict, cfg: dict) -> dict:
-    c    = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = imp - prec
-    onss_net = onss - bon
-
-    parts_debut = (cfg["periode"].get("debut") or "").split("/")
-    mois_an = (f"{_mois_texte(int(parts_debut[1]))} {parts_debut[2]}"
-               if len(parts_debut) == 3 else "")
-
+    c = fiche["calculs"]
+    brut = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon  = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec = D(c["precompte_net"]); net = imp - prec
+    parts = (cfg["periode"].get("debut") or "").split("/")
+    mois_an = f"{_mois_texte_fr(int(parts[1]))} {parts[2]}" if len(parts)==3 else ""
     return {
         "nom":           (cfg["salarie"].get("nom") or "").upper(),
-        "adresse_rue":   cfg["salarie"].get("adresse", "").upper(),
-        "adresse_ville": cfg["salarie"].get("cp_ville", ""),
-        "niss":          cfg["perso"].get("niss", ""),
-        "periode":       mois_an,
-        "date_calcul":   cfg["periode"].get("calcul", ""),
+        "adresse_rue":   cfg["salarie"].get("adresse","").upper(),
+        "adresse_ville": cfg["salarie"].get("cp_ville",""),
+        "niss":          cfg["perso"].get("niss",""),
+        "periode":       f"Période {mois_an}",
+        "date_calcul":   f"Calculé le {cfg['periode'].get('calcul','')}",
         "brut_onss":     eur_be(brut),
-        "onss_trav":     eur_be(onss_net),
+        "onss_trav":     eur_be(onss - bon),
         "imposable":     eur_be(imp),
         "precompte":     eur_be(prec),
         "net_base":      eur_be(net),
-        "net_payer":     eur_be(net),
+        "net_payer":     eur_be(net) + " EUR",
     }
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 5. Partena Professional
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_PARTENA = {
-    "nom":              ("Cimen Mucahit",        "left"),
-    "adresse_rue":      ("Rue Franchimont 20",   "left"),
-    "adresse_ville":    ("4800 Verviers",         "left"),
-    "niss":             ("86.07.11-527.28",       "left"),
-    "periode_debut":    ("01/06/2026",            "left", "sous"),
-    "periode_fin":      ("30/06/2026",            "left", "sous"),
-    "date_etablie":     ("02/07/2026",            "left", "apres"),
-    "brut_total":       ("2 367,82",              "right"),
-    "onss_trav":        ("-334,23",               "right"),
-    "red_onss":         ("196,01",                "right"),
-    "cot_trav_total":   ("-138,22",               "right"),
-    "imposable":        ("2 229,60",              "right"),
-    "precompte":        ("-186,13",               "right"),
-    "net_final":        ("2 328,82",              "right"),
+    "nom":           ("Cimen Mucahit",                   "left"),
+    "adresse_rue":   ("Rue Franchimont 20",               "left"),
+    "adresse_ville": ("4800 Verviers",                    "left"),
+    "niss":          ("N° registre national : 86.07.11-527.28","left"),
+    "periode":       ("Période 01/06/2026 - 30/06/2026", "left"),
+    "date_etablie":  ("Etablie le 02/07/2026",           "left"),
+    "brut_total":    ("2 367,82",                         "right"),
+    "onss_trav":     ("-334,23",                          "right"),
+    "red_onss":      ("196,01",                           "right"),
+    "cot_trav_total":("-138,22",                          "right"),
+    "imposable":     ("2 229,60",                         "right"),
+    "precompte":     ("-186,13",                          "right"),
+    "net_final":     ("2 328,82",                         "right"),
 }
 
-
 def _periode_partena(annee: int, mois: int) -> dict:
-    debut, fin = _periode_debut_fin(annee, mois)
-    return {"periode_debut": debut, "periode_fin": fin}
-
+    debut, fin = _periode_debut_fin_slash(annee, mois)
+    return {"periode": f"Période {debut} - {fin}"}
 
 def _mapper_partena_config(fiche: dict, cfg: dict) -> dict:
-    c    = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = imp - prec
-
-    # Format Partena : espace comme séparateur de milliers, virgule décimale
-    def eur_partena(v: D) -> str:
-        s = eur_be(v)           # "2.328,82"
-        return s.replace(".", " ")  # "2 328,82"
-
+    c = fiche["calculs"]
+    brut = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon  = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec = D(c["precompte_net"]); net = imp - prec
+    def eur_p(v): return eur_be(v).replace(".", " ")
+    debut = cfg["periode"].get("debut",""); fin = cfg["periode"].get("fin","")
     return {
         "nom":            (cfg["salarie"].get("nom") or "").title(),
-        "adresse_rue":    cfg["salarie"].get("adresse", ""),
-        "adresse_ville":  cfg["salarie"].get("cp_ville", ""),
-        "niss":           cfg["perso"].get("niss", ""),
-        "periode_debut":  cfg["periode"].get("debut", ""),
-        "periode_fin":    cfg["periode"].get("fin", ""),
-        "date_etablie":   cfg["periode"].get("calcul", ""),
-        "brut_total":     eur_partena(brut),
+        "adresse_rue":    cfg["salarie"].get("adresse",""),
+        "adresse_ville":  cfg["salarie"].get("cp_ville",""),
+        "niss":           "N° registre national : " + cfg["perso"].get("niss",""),
+        "periode":        f"Période {debut} - {fin}",
+        "date_etablie":   f"Etablie le {cfg['periode'].get('calcul','')}",
+        "brut_total":     eur_p(brut),
         "onss_trav":      _signe(-onss),
-        "red_onss":       eur_partena(bon) if bon > 0 else "0,00",
+        "red_onss":       eur_p(bon) if bon > 0 else "0,00",
         "cot_trav_total": _signe(-(onss - bon)),
-        "imposable":      eur_partena(imp),
+        "imposable":      eur_p(imp),
         "precompte":      _signe(-prec),
-        "net_final":      eur_partena(net),
+        "net_final":      eur_p(net),
     }
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 6. TwinnTax — Dirigeant d'entreprise
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_TWINNTAX = {
-    "nom":              ("Kokou Kouatchi",        "left"),
-    "adresse_rue":      ("Rue François Cloes 1",  "left"),
-    "adresse_ville":    ("4420 SAINT-NICOLAS",    "left"),
-    "niss":             ("79000090179",           "left"),
-    "periode":          ("Aout 2026",             "left", "apres"),
-    "date_calcul":      ("31/08/2026",            "left", "apres"),
-    "salaire_brut":     ("+2.296,40",             "right"),
-    "cotisations":      ("+477,61",               "right"),
-    "precompte":        ("-406,40",               "right"),
-    "atn_total":        ("-489,61",               "right"),
-    "base_imposable":   ("2.786,01",              "right"),
-    "cotisations_res":  ("477,61",                "right"),
-    "precompte_res":    ("406,40",                "right"),
-    "net_payer":        ("2.000,00",              "right"),
+    "nom":            ("Kokou Kouatchi",          "left"),
+    "adresse_rue":    ("Rue François Cloes 1",    "left"),
+    "adresse_ville":  ("4420 SAINT-NICOLAS (LG.)","left"),
+    "niss":           ("79000090179",             "left"),
+    "periode":        ("Période: Aout 2026",       "left"),
+    "date_calcul":    ("Date de calcul : 31/08/2026","left"),
+    "salaire_brut":   ("+2.296,40",               "right"),
+    "cotisations":    ("+477,61",                  "right"),
+    "precompte":      ("-406,40",                  "right"),
+    "atn_total":      ("-489,61",                  "right"),
+    "base_imposable": ("2.786,01",                 "right"),
+    "cotisations_res":("477,61",                   "right"),
+    "precompte_res":  ("406,40",                   "right"),
+    "net_payer":      ("2.000,00",                 "right"),
 }
 
-
 def _periode_twinntax(annee: int, mois: int) -> dict:
-    return {"periode": f"{_mois_texte(mois).capitalize()} {annee}"}
-
+    return {"periode": f"Période: {_mois_texte_fr(mois).capitalize()} {annee}"}
 
 def _mapper_twinntax_config(fiche: dict, cfg: dict) -> dict:
-    c    = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = D(c["net_a_payer"])
+    c = fiche["calculs"]
+    brut = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon  = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec = D(c["precompte_net"]); net = D(c["net_a_payer"])
     onss_net = onss - bon
-
-    # ATN éventuels
     atn_total = D("0")
     for a in cfg.get("atn", []):
-        try:
-            atn_total += D(str(a.get("montant", "0")).replace(",", "."))
-        except Exception:
-            pass
-
-    parts_debut = (cfg["periode"].get("debut") or "").split("/")
-    periode_str = ""
-    if len(parts_debut) == 3:
-        periode_str = f"{_mois_texte(int(parts_debut[1])).capitalize()} {parts_debut[2]}"
-
+        try: atn_total += D(str(a.get("montant","0")).replace(",","."))
+        except: pass
+    parts = (cfg["periode"].get("debut") or "").split("/")
+    periode_str = f"Période: {_mois_texte_fr(int(parts[1])).capitalize()} {parts[2]}" if len(parts)==3 else ""
     return {
         "nom":             (cfg["salarie"].get("nom") or "").title(),
-        "adresse_rue":     cfg["salarie"].get("adresse", ""),
-        "adresse_ville":   cfg["salarie"].get("cp_ville", "").upper(),
-        "niss":            cfg["perso"].get("niss", ""),
+        "adresse_rue":     cfg["salarie"].get("adresse",""),
+        "adresse_ville":   cfg["salarie"].get("cp_ville","").upper(),
+        "niss":            cfg["perso"].get("niss",""),
         "periode":         periode_str,
-        "date_calcul":     cfg["periode"].get("calcul", ""),
+        "date_calcul":     f"Date de calcul : {cfg['periode'].get('calcul','')}",
         "salaire_brut":    "+" + eur_be(brut),
         "cotisations":     "+" + eur_be(onss_net),
         "precompte":       _signe(-prec),
@@ -1070,81 +968,64 @@ def _mapper_twinntax_config(fiche: dict, cfg: dict) -> dict:
         "net_payer":       eur_be(net),
     }
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 7. Ville de Liège
 # ──────────────────────────────────────────────────────────────────────────────
-
 _REPERES_LIEGE = {
-    "nom":              ("Mme PATRICIA GRIFNAIE", "left"),
-    "adresse_rue":      ("rue Adolph Renson, 38", "left"),
-    "adresse_ville":    ("4420 St-Nicolas",        "left"),
-    "niss":             ("68100416846",            "left"),
-    "mois_prestation":  ("07/2026",                "left", "apres"),
-    "date_calcul":      ("07/2026",                "left", "sous"),
-    "brut":             ("2.968,53",               "right"),
-    "onss_perso":       ("-387,99",                "right"),
-    "bonus_emploi":     ("100,89",                 "right"),
-    "imposable":        ("2.681,43",               "right"),
-    "precompte":        ("-425,23",                "right"),
-    "cot_speciale":     ("-23,00",                 "right"),
-    "salaire_net":      ("2.233,20",               "right"),
-    "a_payer":          ("2.233,20",               "right"),
+    "nom":            ("Mme PATRICIA GRIFNAIE", "left"),
+    "adresse_rue":    ("rue Adolph Renson, 38",  "left"),
+    "adresse_ville":  ("4420 St-Nicolas",         "left"),
+    "niss":           ("68100416846",             "left"),
+    "mois_presta":    ("07/2026",                 "left"),
+    "brut":           ("2.968,53 \u20ac",         "right"),
+    "onss_perso":     ("-387,99 \u20ac",          "right"),
+    "bonus_emploi":   ("100,89 \u20ac",           "right"),
+    "imposable":      ("2.681,43 \u20ac",         "right"),
+    "precompte":      ("-425,23 \u20ac",          "right"),
+    "cot_speciale":   ("-23,00 \u20ac",           "right"),
+    "salaire_net":    ("2.233,20 \u20ac",         "right"),
+    "a_payer":        ("2.233,20 \u20ac",         "right"),
 }
 
-
 def _periode_liege(annee: int, mois: int) -> dict:
-    return {"mois_prestation": f"{mois:02d}/{annee}", "date_calcul": f"{mois:02d}/{annee}"}
-
+    return {"mois_presta": f"{mois:02d}/{annee}"}
 
 def _mapper_liege_config(fiche: dict, cfg: dict) -> dict:
-    c    = fiche["calculs"]
-    brut = D(c["brut_total"])
-    onss = D(c["onss_perso"])
-    bon  = D(c["bonus_social"])
-    imp  = D(c["imposable"])
-    prec = D(c["precompte_net"])
-    net  = imp - prec
+    c = fiche["calculs"]
+    brut = D(c["brut_total"]); onss = D(c["onss_perso"])
+    bon  = D(c["bonus_social"]); imp = D(c["imposable"])
+    prec = D(c["precompte_net"]); net = imp - prec
     onss_net = onss - bon
-
-    parts_debut = (cfg["periode"].get("debut") or "").split("/")
-    mm_aa = (f"{parts_debut[1]}/{parts_debut[2]}"
-             if len(parts_debut) == 3 else "")
-
+    parts = (cfg["periode"].get("debut") or "").split("/")
+    mm_aa = f"{parts[1]}/{parts[2]}" if len(parts)==3 else ""
+    def eur_e(v): return eur_be(v) + " €"
     return {
-        "nom":             "Mme " + (cfg["salarie"].get("nom") or "").upper(),
-        "adresse_rue":     cfg["salarie"].get("adresse", ""),
-        "adresse_ville":   cfg["salarie"].get("cp_ville", ""),
-        "niss":            cfg["perso"].get("niss", ""),
-        "mois_prestation": mm_aa,
-        "date_calcul":     mm_aa,
-        "brut":            eur_be(brut),
-        "onss_perso":      _signe(-onss_net),
-        "bonus_emploi":    eur_be(bon) if bon > 0 else "0,00",
-        "imposable":       eur_be(imp),
-        "precompte":       _signe(-prec),
-        "cot_speciale":    "-23,00",   # fixe Ville de Liège
-        "salaire_net":     eur_be(net),
-        "a_payer":         eur_be(net),
+        "nom":            "Mme " + (cfg["salarie"].get("nom") or "").upper(),
+        "adresse_rue":    cfg["salarie"].get("adresse",""),
+        "adresse_ville":  cfg["salarie"].get("cp_ville",""),
+        "niss":           cfg["perso"].get("niss",""),
+        "mois_presta":    mm_aa,
+        "brut":           eur_e(brut),
+        "onss_perso":     _signe(-onss_net) + " €",
+        "bonus_emploi":   eur_e(bon) if bon > 0 else "0,00 €",
+        "imposable":      eur_e(imp),
+        "precompte":      _signe(-prec) + " €",
+        "cot_speciale":   "-23,00 €",
+        "salaire_net":    eur_e(net),
+        "a_payer":        eur_e(net),
     }
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Ajout des templates dans le dict TEMPLATES
-# (à coller après le bloc TEMPLATES existant, avant def get(...))
-# ──────────────────────────────────────────────────────────────────────────────
-
+# ── Ajout dans TEMPLATES ──────────────────────────────────────────────────────
 TEMPLATES["hsp_be"] = Template(
     nom="HSP (Human Social Process) — CLAES FISH",
     pdf=RACINE / "hsp.pdf",
     reperes=_REPERES_HSP,
-    mapper_config=None,  # branché ci-dessous
+    mapper_config=None,
     periode=_periode_hsp,
     supporte_composer=True,
     employeur_fixe={"nom": "CLAES FISH SPRL", "ville": "1200 Woluwe-Saint-Lambert"},
     pages_a_garder=[0],
 )
-
 TEMPLATES["bosa_spf"] = Template(
     nom="BOSA / SPF — Fiche de traitement (public)",
     pdf=RACINE / "bosa_spf.pdf",
@@ -1153,11 +1034,10 @@ TEMPLATES["bosa_spf"] = Template(
     periode=_periode_bosa,
     supporte_composer=True,
     employeur_fixe={"nom": "SPF Justice", "ville": "1000 Bruxelles"},
-    pages_a_garder=[0, 1],
+    pages_a_garder=[0],
 )
-
 TEMPLATES["tpalm_be"] = Template(
-    nom="T.PALM — Billet de paie construction (Theux)",
+    nom="T.PALM — Billet de paie construction",
     pdf=RACINE / "tpalm.pdf",
     reperes=_REPERES_TPALM,
     mapper_config=None,
@@ -1166,7 +1046,6 @@ TEMPLATES["tpalm_be"] = Template(
     employeur_fixe={"nom": "T.PALM", "ville": "4910 Theux"},
     pages_a_garder=[0],
 )
-
 TEMPLATES["ucm_be"] = Template(
     nom="UCM Secrétariat social — Ouvrier transport",
     pdf=RACINE / "ucm.pdf",
@@ -1177,9 +1056,8 @@ TEMPLATES["ucm_be"] = Template(
     employeur_fixe={"nom": "KOUATCHI TRANSPORT SRL", "ville": "4420 Saint-Nicolas"},
     pages_a_garder=[0],
 )
-
 TEMPLATES["partena_be"] = Template(
-    nom="Partena Professional — Ouvrier transport (Liège)",
+    nom="Partena Professional — Ouvrier transport",
     pdf=RACINE / "partena.pdf",
     reperes=_REPERES_PARTENA,
     mapper_config=None,
@@ -1188,9 +1066,8 @@ TEMPLATES["partena_be"] = Template(
     employeur_fixe={"nom": "CLARAP TRANSPORT", "ville": "4000 Liège"},
     pages_a_garder=[0],
 )
-
 TEMPLATES["twinntax_be"] = Template(
-    nom="TwinnTax — Dirigeant d'entreprise (Belgique)",
+    nom="TwinnTax — Dirigeant d'entreprise",
     pdf=RACINE / "twinntax.pdf",
     reperes=_REPERES_TWINNTAX,
     mapper_config=None,
@@ -1200,9 +1077,8 @@ TEMPLATES["twinntax_be"] = Template(
     employeur_fixe={"nom": "KOUATCHI TRANSPORT", "ville": "4420 Saint-Nicolas"},
     pages_a_garder=[0],
 )
-
 TEMPLATES["liege_be"] = Template(
-    nom="Ville de Liège — Fiche de paie (public contractuel)",
+    nom="Ville de Liège — Fiche de paie (public)",
     pdf=RACINE / "liege.pdf",
     reperes=_REPERES_LIEGE,
     mapper_config=None,
@@ -1212,7 +1088,7 @@ TEMPLATES["liege_be"] = Template(
     pages_a_garder=[0],
 )
 
-# ── Branchement des mappers ────────────────────────────────────────────────────
+# ── Branchement mappers ───────────────────────────────────────────────────────
 TEMPLATES["hsp_be"].mapper_config      = _mapper_hsp_config
 TEMPLATES["bosa_spf"].mapper_config    = _mapper_bosa_config
 TEMPLATES["tpalm_be"].mapper_config    = _mapper_tpalm_config
